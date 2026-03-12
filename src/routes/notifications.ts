@@ -38,12 +38,20 @@ router.get('/', requireAuth, async (req: Request, res: Response, next: NextFunct
 });
 
 // POST / - Send notification
-router.post('/', requireAuth, requireRole(UserRole.ORG_ADMIN, UserRole.PM_STAFF),
+router.post('/', requireAuth, requireRole(UserRole.OWNER),
   validateBody(sendNotificationSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = (req as AuthenticatedRequest).user;
       const { recipientUserId, title, body, type, relatedType, relatedId } = req.body;
+
+      // Verify recipient belongs to caller's org
+      const recipient = await queryOne(
+        `SELECT id FROM "User" WHERE id = $1 AND "organizationId" = $2`,
+        [recipientUserId, user.orgId],
+      );
+      if (!recipient) throw new NotFoundError('Recipient not found');
+
       const row = await queryOne(
         `INSERT INTO notifications (organization_id, recipient_user_id, sender_user_id, title, body, type, related_type, related_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
@@ -56,13 +64,13 @@ router.post('/', requireAuth, requireRole(UserRole.ORG_ADMIN, UserRole.PM_STAFF)
   }
 );
 
-// GET /:id
+// GET /:id — user can only read their own notifications
 router.get('/:id', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = (req as AuthenticatedRequest).user;
     const row = await queryOne(
-      `SELECT * FROM notifications WHERE id = $1 AND organization_id = $2`,
-      [req.params.id, user.orgId]
+      `SELECT * FROM notifications WHERE id = $1 AND recipient_user_id = $2 AND organization_id = $3`,
+      [req.params.id, user.userId, user.orgId]
     );
     if (!row) throw new NotFoundError('Notification not found');
     res.json({ data: row });
@@ -83,7 +91,7 @@ router.patch('/:id/read', requireAuth, async (req: Request, res: Response, next:
 });
 
 // POST /bulk - Bulk send
-router.post('/bulk', requireAuth, requireRole(UserRole.ORG_ADMIN, UserRole.PM_STAFF),
+router.post('/bulk', requireAuth, requireRole(UserRole.OWNER),
   validateBody(z.object({
     recipientUserIds: z.array(z.string().min(1)).min(1),
     title: z.string().min(1),
@@ -94,6 +102,16 @@ router.post('/bulk', requireAuth, requireRole(UserRole.ORG_ADMIN, UserRole.PM_ST
     try {
       const user = (req as AuthenticatedRequest).user;
       const { recipientUserIds, title, body, type } = req.body;
+
+      // Verify all recipients belong to caller's org
+      for (const recipientId of recipientUserIds) {
+        const recipient = await queryOne(
+          `SELECT id FROM "User" WHERE id = $1 AND "organizationId" = $2`,
+          [recipientId, user.orgId],
+        );
+        if (!recipient) throw new NotFoundError('Recipient not found');
+      }
+
       const results = [];
       for (const recipientId of recipientUserIds) {
         const row = await queryOne(
